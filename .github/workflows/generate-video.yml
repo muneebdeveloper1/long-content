@@ -1,0 +1,94 @@
+name: Generate Video
+
+on:
+  workflow_dispatch:
+    inputs:
+      topic:
+        description: "Video topic"
+        required: true
+        type: string
+
+      video_source:
+        description: "Video material source"
+        required: true
+        type: choice
+        options:
+          - pexels
+          - pixabay
+          - coverr
+          - local
+
+      stop_at:
+        description: "Pipeline stage"
+        required: true
+        type: choice
+        default: video
+        options:
+          - script
+          - terms
+          - audio
+          - subtitle
+          - materials
+          - video
+
+jobs:
+  generate:
+    name: Generate MoneyPrinterTurbo video
+    runs-on: ubuntu-latest
+
+    timeout-minutes: 60
+
+    steps:
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: |
+          uv sync --frozen --python 3.11
+
+      - name: Install FFmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Check FFmpeg
+        run: |
+          ffmpeg -version
+
+      - name: Generate video
+        env:
+          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+          PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          uv run python cli.py \
+            --video-subject "${{ inputs.topic }}" \
+            --video-source "${{ inputs.video_source }}" \
+            --stop-at "${{ inputs.stop_at }}"
+
+      - name: Find generated files
+        if: always()
+        run: |
+          echo "Generated files:"
+          find storage -type f 2>/dev/null | head -200 || true
+
+      - name: Upload generated files
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: moneyprinterturbo-output
+          path: |
+            storage/
+          retention-days: 7
