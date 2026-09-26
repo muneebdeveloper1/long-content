@@ -27,8 +27,8 @@ from app.models.schema import (
     TaskQueryResponse,
     TaskResponse,
     TaskVideoRequest,
+    VideoMaterialRetrieveResponse,
     VideoMaterialUploadResponse,
-    VideoMaterialRetrieveResponse
 )
 from app.services import bgm as bgm_service
 from app.services import material_upload as material_upload_service
@@ -36,9 +36,12 @@ from app.services import state as sm
 from app.services import task as tm
 from app.utils import file_security, utils
 
-# 统一在 V1 视频路由入口执行鉴权。verify_token 会在 api_key 为空时
-# 保留现有免认证行为，只有管理员显式配置后才会影响客户端。
+
+# 统一在 V1 视频路由入口执行鉴权。
+# verify_token 会在 api_key 为空时保留现有免认证行为，
+# 只有管理员显式配置后才会影响客户端。
 router = new_router(dependencies=[Depends(base.verify_token)])
+
 
 _enable_redis = config.app.get("enable_redis", False)
 _redis_host = config.app.get("redis_host", "localhost")
@@ -49,12 +52,24 @@ _max_concurrent_tasks = config.app.get("max_concurrent_tasks", 5)
 _max_queued_tasks = config.app.get("max_queued_tasks", 100)
 
 
-def _build_redis_url(host: str, port: int, db: int, password: str | None) -> str:
+def _build_redis_url(
+    host: str,
+    port: int,
+    db: int,
+    password: str | None,
+) -> str:
     auth = f":{password}@" if password else ""
     return f"redis://{auth}{host}:{port}/{db}"
 
 
-redis_url = _build_redis_url(_redis_host, _redis_port, _redis_db, _redis_password)
+redis_url = _build_redis_url(
+    _redis_host,
+    _redis_port,
+    _redis_db,
+    _redis_password,
+)
+
+
 # 根据配置选择合适的任务管理器
 if _enable_redis:
     task_manager = RedisTaskManager(
@@ -69,27 +84,45 @@ else:
     )
 
 
-def _sanitize_upload_filename(filename: str, request_id: str) -> str:
+def _sanitize_upload_filename(
+    filename: str,
+    request_id: str,
+) -> str:
     # 浏览器或客户端有时会附带目录信息，甚至可能夹带 ../ 这类穿越片段。
     # 这里只保留纯文件名，避免上传接口把文件写到目标目录之外。
-    normalized_name = (filename or "").replace("\\", "/").split("/")[-1].strip()
+    normalized_name = (
+        (filename or "")
+        .replace("\\", "/")
+        .split("/")[-1]
+        .strip()
+    )
+
     if not normalized_name or normalized_name in {".", ".."}:
         raise HttpException(
             task_id=request_id,
             status_code=400,
             message=f"{request_id}: invalid filename",
         )
+
     return normalized_name
 
 
-def _resolve_path_within_directory(base_dir: str, unsafe_path: str, request_id: str) -> str:
+def _resolve_path_within_directory(
+    base_dir: str,
+    unsafe_path: str,
+    request_id: str,
+) -> str:
     try:
-        return file_security.resolve_path_within_directory(base_dir, unsafe_path)
+        return file_security.resolve_path_within_directory(
+            base_dir,
+            unsafe_path,
+        )
     except ValueError as exc:
         logger.warning(
-            f"reject unsafe file path, request_id: {request_id}, path: {unsafe_path}, "
-            f"error: {str(exc)}"
+            f"reject unsafe file path, request_id: {request_id}, "
+            f"path: {unsafe_path}, error: {str(exc)}"
         )
+
         raise HttpException(
             task_id=request_id,
             status_code=404 if str(exc) == "file does not exist" else 403,
@@ -104,7 +137,12 @@ def _public_task_data(task: dict) -> dict:
     return public_task
 
 
-def _task_file_to_uri(file: str, endpoint: str, task_dir: str, request_id: str) -> str:
+def _task_file_to_uri(
+    file: str,
+    endpoint: str,
+    task_dir: str,
+    request_id: str,
+) -> str:
     if not isinstance(file, str):
         return file
 
@@ -112,27 +150,39 @@ def _task_file_to_uri(file: str, endpoint: str, task_dir: str, request_id: str) 
         return file
 
     try:
-        resolved_path = file_security.resolve_path_within_directory(task_dir, file)
+        resolved_path = file_security.resolve_path_within_directory(
+            task_dir,
+            file,
+        )
     except ValueError as exc:
-        # 任务状态理论上只应保存任务目录内的产物路径。这里不再继续拼接 URL，
-        # 避免把异常路径包装成可访问链接；同时保留原值，便于排查历史脏数据。
+        # 任务状态理论上只应保存任务目录内的产物路径。
+        # 这里不再继续拼接 URL，避免把异常路径包装成可访问链接。
         logger.warning(
-            f"skip unsafe task output path, request_id: {request_id}, path: {file}, "
-            f"error: {str(exc)}"
+            f"skip unsafe task output path, request_id: {request_id}, "
+            f"path: {file}, error: {str(exc)}"
         )
         return file
 
-    relative_path = os.path.relpath(resolved_path, task_dir).replace("\\", "/")
+    relative_path = os.path.relpath(
+        resolved_path,
+        task_dir,
+    ).replace("\\", "/")
+
     uri_path = f"tasks/{relative_path}"
+
     if endpoint:
         return f"{endpoint.rstrip('/')}/{uri_path}"
+
     return f"/{uri_path}"
 
 
 def _parse_byte_range(
-    range_header: str | None, file_size: int, request_id: str
+    range_header: str | None,
+    file_size: int,
+    request_id: str,
 ) -> tuple[int, int]:
     """解析单段 HTTP Range，并把无效或越界请求稳定转换成 416。"""
+
     if file_size <= 0:
         raise HttpException(
             task_id=request_id,
@@ -144,31 +194,41 @@ def _parse_byte_range(
         return 0, file_size - 1
 
     try:
-        # 视频播放器这里只需要单段 bytes range。拒绝多段请求可以避免返回体
-        # 与 Content-Range 不一致，也避免异常字符串落入 int() 产生 500。
+        # 视频播放器这里只需要单段 bytes range。
+        # 拒绝多段请求可以避免返回体与 Content-Range 不一致。
         if not range_header.startswith("bytes=") or "," in range_header:
             raise ValueError("unsupported range format")
+
         start_text, end_text = range_header[6:].split("-", 1)
+
         if not start_text and not end_text:
             raise ValueError("empty range")
 
         if not start_text:
             suffix_length = int(end_text)
+
             if suffix_length <= 0:
                 raise ValueError("invalid suffix length")
+
             start = max(file_size - suffix_length, 0)
             end = file_size - 1
+
         else:
             start = int(start_text)
             end = int(end_text) if end_text else file_size - 1
+
             if start < 0 or start >= file_size or end < start:
                 raise ValueError("range outside file")
+
             end = min(end, file_size - 1)
+
     except (TypeError, ValueError) as exc:
         logger.warning(
             f"reject invalid video range, request_id: {request_id}, "
-            f"range: {range_header}, file_size: {file_size}, error: {str(exc)}"
+            f"range: {range_header}, file_size: {file_size}, "
+            f"error: {str(exc)}"
         )
+
         raise HttpException(
             task_id=request_id,
             status_code=416,
@@ -178,34 +238,69 @@ def _parse_byte_range(
     return start, end
 
 
-@router.post("/videos", response_model=TaskResponse, summary="Generate a short video")
+@router.post(
+    "/videos",
+    response_model=TaskResponse,
+    summary="Generate a short video",
+)
 def create_video(
-    background_tasks: BackgroundTasks, request: Request, body: TaskVideoRequest
+    background_tasks: BackgroundTasks,
+    request: Request,
+    body: TaskVideoRequest,
 ):
-    return create_task(request, body, stop_at="video")
+    return create_task(
+        request,
+        body,
+        stop_at="video",
+    )
 
 
-@router.post("/subtitle", response_model=TaskResponse, summary="Generate subtitle only")
+@router.post(
+    "/subtitle",
+    response_model=TaskResponse,
+    summary="Generate subtitle only",
+)
 def create_subtitle(
-    background_tasks: BackgroundTasks, request: Request, body: SubtitleRequest
+    background_tasks: BackgroundTasks,
+    request: Request,
+    body: SubtitleRequest,
 ):
-    return create_task(request, body, stop_at="subtitle")
+    return create_task(
+        request,
+        body,
+        stop_at="subtitle",
+    )
 
 
-@router.post("/audio", response_model=TaskResponse, summary="Generate audio only")
+@router.post(
+    "/audio",
+    response_model=TaskResponse,
+    summary="Generate audio only",
+)
 def create_audio(
-    background_tasks: BackgroundTasks, request: Request, body: AudioRequest
+    background_tasks: BackgroundTasks,
+    request: Request,
+    body: AudioRequest,
 ):
-    return create_task(request, body, stop_at="audio")
+    return create_task(
+        request,
+        body,
+        stop_at="audio",
+    )
 
 
 def create_task(
     request: Request,
-    body: Union[TaskVideoRequest, SubtitleRequest, AudioRequest],
+    body: Union[
+        TaskVideoRequest,
+        SubtitleRequest,
+        AudioRequest,
+    ],
     stop_at: str,
 ):
     task_id = utils.get_uuid()
     request_id = base.get_task_id(request)
+
     try:
         if (
             stop_at == "video"
@@ -213,60 +308,104 @@ def create_task(
             and body.subtitle_enabled
         ):
             # 字体名可由 API 客户端直接提交，不能等到后台渲染时才发现路径越界。
-            # 这里与渲染层共用目录边界校验，让非法请求在创建付费任务前返回 400。
+            #
+            # IMPORTANT:
+            # MicrosoftYaHeiBold.ttc exists inside:
+            # resource/fonts/
+            #
+            # The previous STHeitiMedium.ttc fallback did not exist on
+            # the GitHub Actions runner/repository.
             file_security.resolve_path_within_directory(
-                utils.font_dir(), body.font_name or "STHeitiMedium.ttc"
+                utils.font_dir(),
+                body.font_name or "MicrosoftYaHeiBold.ttc",
             )
+
         task = {
             "task_id": task_id,
             "request_id": request_id,
             "params": body.model_dump(),
         }
+
         sm.state.update_task(task_id)
+
         try:
             task_manager.add_task(
-                tm.start, task_id=task_id, params=body, stop_at=stop_at
+                tm.start,
+                task_id=task_id,
+                params=body,
+                stop_at=stop_at,
             )
+
         except Exception:
-            # 状态记录在调度前创建，默认标记为 processing。如果调度器没能
-            # 接管任务（例如线程启动失败或 Redis 队列不可用），必须回滚该
-            # 记录，否则 API 和 WebUI 会永久展示一个实际从未运行的任务。
+            # 状态记录在调度前创建，默认标记为 processing。
+            # 如果调度器没能接管任务，必须回滚该记录。
             sm.state.delete_task(task_id)
             raise
-        logger.success(f"Task created: {utils.to_json(task)}")
-        return utils.get_response(200, task)
-    except TaskQueueFullError as e:
-        logger.warning(
-            f"reject task because queue is full, request_id: {request_id}, task_id: {task_id}"
-        )
-        raise HttpException(
-            task_id=task_id, status_code=429, message=f"{request_id}: {str(e)}"
-        )
-    except ValueError as e:
-        raise HttpException(
-            task_id=task_id, status_code=400, message=f"{request_id}: {str(e)}"
+
+        logger.success(
+            f"Task created: {utils.to_json(task)}"
         )
 
-@router.get("/tasks", response_model=TaskListResponse, summary="Get all tasks")
+        return utils.get_response(
+            200,
+            task,
+        )
+
+    except TaskQueueFullError as e:
+        logger.warning(
+            f"reject task because queue is full, "
+            f"request_id: {request_id}, task_id: {task_id}"
+        )
+
+        raise HttpException(
+            task_id=task_id,
+            status_code=429,
+            message=f"{request_id}: {str(e)}",
+        )
+
+    except ValueError as e:
+        raise HttpException(
+            task_id=task_id,
+            status_code=400,
+            message=f"{request_id}: {str(e)}",
+        )
+
+
+@router.get(
+    "/tasks",
+    response_model=TaskListResponse,
+    summary="Get all tasks",
+)
 def get_all_tasks(
     request: Request,
     page: int = Query(1, ge=1),
     page_size: int = Query(10, ge=1),
 ):
-    tasks, total = sm.state.get_all_tasks(page, page_size)
+    tasks, total = sm.state.get_all_tasks(
+        page,
+        page_size,
+    )
 
     response = {
-        "tasks": [_public_task_data(task) for task in tasks],
+        "tasks": [
+            _public_task_data(task)
+            for task in tasks
+        ],
         "total": total,
         "page": page,
         "page_size": page_size,
     }
-    return utils.get_response(200, response)
 
+    return utils.get_response(
+        200,
+        response,
+    )
 
 
 @router.get(
-    "/tasks/{task_id}", response_model=TaskQueryResponse, summary="Query task status"
+    "/tasks/{task_id}",
+    response_model=TaskQueryResponse,
+    summary="Query task status",
 )
 def get_task(
     request: Request,
@@ -274,26 +413,48 @@ def get_task(
     query: TaskQueryRequest = Depends(),
 ):
     request_id = base.get_task_id(request)
-    endpoint = config.app.get("endpoint", "").rstrip("/")
+    endpoint = config.app.get(
+        "endpoint",
+        "",
+    ).rstrip("/")
+
     task = sm.state.get_task(task_id)
+
     if task:
         task_dir = utils.task_dir()
         response_task = _public_task_data(task)
 
         if "videos" in task:
             response_task["videos"] = [
-                _task_file_to_uri(v, endpoint, task_dir, request_id)
+                _task_file_to_uri(
+                    v,
+                    endpoint,
+                    task_dir,
+                    request_id,
+                )
                 for v in task["videos"]
             ]
+
         if "combined_videos" in task:
             response_task["combined_videos"] = [
-                _task_file_to_uri(v, endpoint, task_dir, request_id)
+                _task_file_to_uri(
+                    v,
+                    endpoint,
+                    task_dir,
+                    request_id,
+                )
                 for v in task["combined_videos"]
             ]
-        return utils.get_response(200, response_task)
+
+        return utils.get_response(
+            200,
+            response_task,
+        )
 
     raise HttpException(
-        task_id=task_id, status_code=404, message=f"{request_id}: task not found"
+        task_id=task_id,
+        status_code=404,
+        message=f"{request_id}: task not found",
     )
 
 
@@ -302,16 +463,23 @@ def get_task(
     response_model=TaskDeletionResponse,
     summary="Delete a generated short video task",
 )
-def delete_video(request: Request, task_id: str = Path(..., description="Task ID")):
+def delete_video(
+    request: Request,
+    task_id: str = Path(..., description="Task ID"),
+):
     request_id = base.get_task_id(request)
     task = sm.state.get_task(task_id)
+
     if task:
         if tm.is_task_busy(task):
             logger.warning(
-                f"refuse to delete busy task, request_id: {request_id}, "
-                f"task_id: {task_id}, state: {task.get('state')}, "
+                f"refuse to delete busy task, "
+                f"request_id: {request_id}, "
+                f"task_id: {task_id}, "
+                f"state: {task.get('state')}, "
                 f"cross_post_state: {task.get('cross_post_state')}"
             )
+
             raise HttpException(
                 task_id=task_id,
                 status_code=409,
@@ -319,37 +487,57 @@ def delete_video(request: Request, task_id: str = Path(..., description="Task ID
             )
 
         tasks_dir = utils.task_dir()
-        current_task_dir = os.path.join(tasks_dir, task_id)
+        current_task_dir = os.path.join(
+            tasks_dir,
+            task_id,
+        )
+
         if os.path.exists(current_task_dir):
             shutil.rmtree(current_task_dir)
 
         sm.state.delete_task(task_id)
-        logger.success(f"video deleted: {utils.to_json(task)}")
+
+        logger.success(
+            f"video deleted: {utils.to_json(task)}"
+        )
+
         return utils.get_response(200)
 
     raise HttpException(
-        task_id=task_id, status_code=404, message=f"{request_id}: task not found"
+        task_id=task_id,
+        status_code=404,
+        message=f"{request_id}: task not found",
     )
 
 
 @router.get(
-    "/musics", response_model=BgmRetrieveResponse, summary="Retrieve local BGM files"
+    "/musics",
+    response_model=BgmRetrieveResponse,
+    summary="Retrieve local BGM files",
 )
 def get_bgm_list(request: Request):
     bgm_list = []
+
     for file in bgm_service.list_bgm_files():
         filename = os.path.basename(file)
+
         bgm_list.append(
             {
                 "name": filename,
                 "size": os.path.getsize(file),
-                # 只返回文件名，避免把服务器绝对路径暴露给调用方。服务端会
-                # 在 storage/bgm 和 resource/songs 两个白名单目录中重新解析。
+                # 只返回文件名，避免把服务器绝对路径暴露给调用方。
                 "file": filename,
             }
         )
-    response = {"files": bgm_list}
-    return utils.get_response(200, response)
+
+    response = {
+        "files": bgm_list,
+    }
+
+    return utils.get_response(
+        200,
+        response,
+    )
 
 
 @router.post(
@@ -361,69 +549,124 @@ def get_bgm_list(request: Request):
         "30 MB and store it under an immutable UUID filename in storage/bgm."
     ),
     responses={
-        400: {"description": "The filename, format, size, or audio stream is invalid"},
-        500: {"description": "FFmpeg validation or persistent storage is unavailable"},
+        400: {
+            "description": (
+                "The filename, format, size, or audio stream is invalid"
+            )
+        },
+        500: {
+            "description": (
+                "FFmpeg validation or persistent storage is unavailable"
+            )
+        },
     },
 )
-def upload_bgm_file(request: Request, file: UploadFile = File(...)):
+def upload_bgm_file(
+    request: Request,
+    file: UploadFile = File(...),
+):
     request_id = base.get_task_id(request)
+
     try:
-        safe_filename = bgm_service.save_bgm_upload(file.filename, file.file)
-    except bgm_service.BgmUploadError as exc:
-        # 上传失败通常可以由用户更换文件后恢复，因此记录 request_id 和明确原因，
-        # 但不输出文件内容或绝对路径，避免日志泄露用户数据。
-        logger.warning(
-            f"background music upload rejected: request_id={request_id}, error={str(exc)}"
+        safe_filename = bgm_service.save_bgm_upload(
+            file.filename,
+            file.file,
         )
+
+    except bgm_service.BgmUploadError as exc:
+        logger.warning(
+            f"background music upload rejected: "
+            f"request_id={request_id}, error={str(exc)}"
+        )
+
         raise HttpException(
             task_id=request_id,
             status_code=400,
             message=f"{request_id}: {str(exc)}",
         )
+
     except bgm_service.BgmServiceError as exc:
-        # 工具链或存储故障属于服务端问题，不能伪装成用户文件错误。日志保留
-        # request_id 和内部原因，HTTP 响应只返回稳定文案，避免暴露服务器路径。
         logger.error(
-            f"background music upload failed: request_id={request_id}, error={str(exc)}"
+            f"background music upload failed: "
+            f"request_id={request_id}, error={str(exc)}"
         )
+
         raise HttpException(
             task_id=request_id,
             status_code=500,
-            message=f"{request_id}: background music validation is unavailable",
+            message=(
+                f"{request_id}: "
+                "background music validation is unavailable"
+            ),
         )
 
-    response = {"file": safe_filename}
-    return utils.get_response(200, response)
+    response = {
+        "file": safe_filename,
+    }
+
+    return utils.get_response(
+        200,
+        response,
+    )
+
 
 @router.get(
-    "/video_materials", response_model=VideoMaterialRetrieveResponse, summary="Retrieve local video materials"
+    "/video_materials",
+    response_model=VideoMaterialRetrieveResponse,
+    summary="Retrieve local video materials",
 )
 def get_video_materials_list(request: Request):
     allowed_suffixes = tuple(
         extension.removeprefix(".")
-        for extension in material_upload_service.SUPPORTED_MATERIAL_EXTENSIONS
+        for extension in (
+            material_upload_service.SUPPORTED_MATERIAL_EXTENSIONS
+        )
     )
-    local_videos_dir = utils.storage_dir("local_videos", create=True)
+
+    local_videos_dir = utils.storage_dir(
+        "local_videos",
+        create=True,
+    )
+
     files = []
+
     for suffix in allowed_suffixes:
-        files.extend(glob.glob(os.path.join(local_videos_dir, f"*.{suffix}")))
-    # 文件系统枚举顺序不稳定，直接返回会导致“顺序拼接”在不同机器或不同
-    # 时刻表现不一致。这里统一按文件名排序，至少保证服务端返回顺序可预测。
-    files.sort(key=lambda file_path: os.path.basename(file_path).lower())
+        files.extend(
+            glob.glob(
+                os.path.join(
+                    local_videos_dir,
+                    f"*.{suffix}",
+                )
+            )
+        )
+
+    # 文件系统枚举顺序不稳定，统一按文件名排序。
+    files.sort(
+        key=lambda file_path: os.path.basename(file_path).lower()
+    )
+
     video_materials_list = []
+
     for file in files:
         filename = os.path.basename(file)
+
         video_materials_list.append(
             {
                 "name": filename,
                 "size": os.path.getsize(file),
-                # 与 BGM 一样，只返回文件名；创建任务时再在 local_videos
-                # 白名单目录内解析，避免 API 泄露宿主机绝对路径。
+                # 与 BGM 一样，只返回文件名。
                 "file": filename,
             }
         )
-    response = {"files": video_materials_list}
-    return utils.get_response(200, response)
+
+    response = {
+        "files": video_materials_list,
+    }
+
+    return utils.get_response(
+        200,
+        response,
+    )
 
 
 @router.post(
@@ -431,86 +674,173 @@ def get_video_materials_list(request: Request):
     response_model=VideoMaterialUploadResponse,
     summary="Upload the video material file to the local videos directory",
 )
-def upload_video_material_file(request: Request, file: UploadFile = File(...)):
+def upload_video_material_file(
+    request: Request,
+    file: UploadFile = File(...),
+):
     request_id = base.get_task_id(request)
+
     try:
-        # Keep accepting browser-supplied client paths, but persist an immutable
-        # UUID storage key so repeated names cannot overwrite queued task inputs.
-        safe_filename = _sanitize_upload_filename(file.filename, request_id)
-        stored_filename = material_upload_service.save_material_upload(
-            safe_filename, file.file
+        # Keep accepting browser-supplied client paths, but persist an
+        # immutable UUID storage key so repeated names cannot overwrite
+        # queued task inputs.
+        safe_filename = _sanitize_upload_filename(
+            file.filename,
+            request_id,
         )
+
+        stored_filename = (
+            material_upload_service.save_material_upload(
+                safe_filename,
+                file.file,
+            )
+        )
+
     except material_upload_service.MaterialUploadError as exc:
         logger.warning(
-            f"local material upload rejected: request_id={request_id}, "
-            f"error={str(exc)}"
+            f"local material upload rejected: "
+            f"request_id={request_id}, error={str(exc)}"
         )
+
         raise HttpException(
             task_id=request_id,
             status_code=400,
             message=f"{request_id}: {str(exc)}",
         )
+
     except material_upload_service.MaterialServiceError as exc:
         logger.error(
-            f"local material upload failed: request_id={request_id}, "
-            f"error={str(exc)}"
+            f"local material upload failed: "
+            f"request_id={request_id}, error={str(exc)}"
         )
+
         raise HttpException(
             task_id=request_id,
             status_code=500,
-            message=f"{request_id}: local material validation is unavailable",
+            message=(
+                f"{request_id}: "
+                "local material validation is unavailable"
+            ),
         )
 
-    response = {"file": stored_filename}
-    return utils.get_response(200, response)
+    response = {
+        "file": stored_filename,
+    }
 
-@router.get("/stream/{file_path:path}")
-async def stream_video(request: Request, file_path: str):
+    return utils.get_response(
+        200,
+        response,
+    )
+
+
+@router.get(
+    "/stream/{file_path:path}"
+)
+async def stream_video(
+    request: Request,
+    file_path: str,
+):
     request_id = base.get_task_id(request)
+
     tasks_dir = utils.task_dir()
-    video_path = _resolve_path_within_directory(tasks_dir, file_path, request_id)
+
+    video_path = _resolve_path_within_directory(
+        tasks_dir,
+        file_path,
+        request_id,
+    )
+
     range_header = request.headers.get("Range")
+
     video_size = os.path.getsize(video_path)
-    start, end = _parse_byte_range(range_header, video_size, request_id)
+
+    start, end = _parse_byte_range(
+        range_header,
+        video_size,
+        request_id,
+    )
+
     length = end - start + 1
 
-    def file_iterator(file_path, offset=0, bytes_to_read=None):
+    def file_iterator(
+        file_path,
+        offset=0,
+        bytes_to_read=None,
+    ):
         with open(file_path, "rb") as f:
-            f.seek(offset, os.SEEK_SET)
+            f.seek(
+                offset,
+                os.SEEK_SET,
+            )
+
             remaining = bytes_to_read or video_size
+
             while remaining > 0:
-                bytes_to_read = min(4096, remaining)
-                data = f.read(bytes_to_read)
+                chunk_size = min(
+                    4096,
+                    remaining,
+                )
+
+                data = f.read(chunk_size)
+
                 if not data:
                     break
+
                 remaining -= len(data)
+
                 yield data
 
     response = StreamingResponse(
-        file_iterator(video_path, start, length), media_type="video/mp4"
+        file_iterator(
+            video_path,
+            start,
+            length,
+        ),
+        media_type="video/mp4",
     )
-    response.headers["Content-Range"] = f"bytes {start}-{end}/{video_size}"
+
+    response.headers["Content-Range"] = (
+        f"bytes {start}-{end}/{video_size}"
+    )
+
     response.headers["Accept-Ranges"] = "bytes"
     response.headers["Content-Length"] = str(length)
-    response.status_code = 206  # Partial Content
+    response.status_code = 206
 
     return response
 
 
-@router.get("/download/{file_path:path}")
-async def download_video(request: Request, file_path: str):
+@router.get(
+    "/download/{file_path:path}"
+)
+async def download_video(
+    request: Request,
+    file_path: str,
+):
     """
     download video
+
     :param request: Request request
-    :param file_path: video file path, eg: /cd1727ed-3473-42a2-a7da-4faafafec72b/final-1.mp4
+    :param file_path: video file path,
+        eg: /cd1727ed-3473-42a2-a7da-4faafafec72b/final-1.mp4
     :return: video file
     """
+
     request_id = base.get_task_id(request)
+
     tasks_dir = utils.task_dir()
-    video_path = _resolve_path_within_directory(tasks_dir, file_path, request_id)
+
+    video_path = _resolve_path_within_directory(
+        tasks_dir,
+        file_path,
+        request_id,
+    )
+
     file_path = pathlib.Path(video_path)
+
     filename = file_path.name
     extension = file_path.suffix
+
     return FileResponse(
         path=video_path,
         filename=filename,
