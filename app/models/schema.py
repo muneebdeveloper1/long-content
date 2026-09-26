@@ -133,3 +133,9 @@ class VideoParams(BaseModel):
     # FIXED: use a font that exists in resource/fonts
     font_name: Optional[str] = "MicrosoftYaHeiBold.ttc"
     text_fore_color: Optional[str] = "#FFFFFF"
+    
+    # Missing fields required by the pipeline:
+    paragraph_number: int = Field(default=1, ge=1)
+    text_background_color: Optional[str] = None
+    stroke_color: Optional[str] = "#000000"
+    stroke_width: Optional[float] = 1.5
